@@ -6,3 +6,5 @@ coverage/
 Thumbs.db
 spikes/RESULTS.md.bak
 *.tsbuildinfo
+__pycache__/
+*.pyc

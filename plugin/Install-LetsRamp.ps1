@@ -4,17 +4,21 @@
   Installs Let's Ramp into DaVinci Resolve Studio on Windows.
 
 .DESCRIPTION
-  Copies LetsRamp.py into Resolve's Scripts\Utility folder (downloading
-  it from GitHub first if it is not next to this script). Run it by
-  double-clicking Install-LetsRamp.cmd, or:
+  Copies LetsRamp.py into Resolve's Workflow Integration Plugins root
+  (shows under Workspace > Workflow Integrations) and into the
+  Editor Pages\Scripts\Utility folder (shows under
+  Workspace > Scripts > Utility) as a fallback for older versions.
+  Downloads the script from GitHub first if it is not next to this
+  script. Run it by double-clicking Install-LetsRamp.cmd, or:
 
     powershell -NoProfile -ExecutionPolicy Bypass -File Install-LetsRamp.ps1
 
   Then restart Resolve Studio and open:
-    Workspace > Scripts > Utility > LetsRamp
+    Workspace > Workflow Integrations > LetsRamp
+  (or Workspace > Scripts > Utility > LetsRamp)
 
 .PARAMETER Uninstall
-  Removes LetsRamp.py from the Utility folder instead of installing.
+  Removes LetsRamp.py from both folders instead of installing.
 #>
 [CmdletBinding()]
 param(
@@ -26,6 +30,9 @@ $ErrorActionPreference = 'Stop'
 $fileName = 'LetsRamp.py'
 $githubRaw = 'https://raw.githubusercontent.com/sleepyhead000/lets-ramp/main/plugin/LetsRamp.py'
 
+$wiFolders = @(
+    (Join-Path $env:PROGRAMDATA 'Blackmagic Design\DaVinci Resolve\Support\Workflow Integration Plugins')
+)
 $utilityFolders = @(
     (Join-Path $env:PROGRAMDATA 'Blackmagic Design\DaVinci Resolve\Support\Editor Pages\Scripts\Utility'),
     (Join-Path $env:APPDATA    'Blackmagic Design\DaVinci Resolve\Support\Editor Pages\Scripts\Utility')
@@ -46,11 +53,9 @@ function Find-ResolveInstall {
 }
 
 function Get-LetsRampSource {
-    # 1) next to this script (offline / extracted-zip case)
     $local = Join-Path $PSScriptRoot $fileName
     if (Test-Path $local) { return $local }
 
-    # 2) download from the GitHub repo
     Write-Host "Not found next to the script - downloading from GitHub..."
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $tmp = Join-Path $env:TEMP $fileName
@@ -85,7 +90,7 @@ $resolveRunning = [bool](Get-Process -Name 'DaVinci Resolve', 'Resolve' -ErrorAc
 try {
     if ($Uninstall) {
         $removed = $false
-        foreach ($dir in $utilityFolders) {
+        foreach ($dir in ($wiFolders + $utilityFolders)) {
             $p = Join-Path $dir $fileName
             if (Test-Path $p) {
                 Remove-Item -LiteralPath $p -Force
@@ -115,25 +120,32 @@ try {
     Assert-LetsRampFile $source
     Write-Host "[ok] Source: $source"
 
-    $destDir = $utilityFolders | Where-Object {
-        $parent = Split-Path $_ -Parent
-        (Test-Path $parent) -or $_ -eq $utilityFolders[0]
-    } | Select-Object -First 1
+    $installed = @()
+    foreach ($dir in $wiFolders) {
+        if (-not (Test-Path $dir)) {
+            Write-Host "Creating: $dir"
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        $dest = Join-Path $dir $fileName
+        Copy-Item -LiteralPath $source -Destination $dest -Force
+        Assert-LetsRampFile $dest
+        Write-Host "[ok] Installed (Workflow Integration): $dest"
+        $installed += $dest
+    }
 
-    # Prefer the folder whose parent exists (correct Resolve version layout)
+    $utilityDestDir = $utilityFolders[0]
     foreach ($dir in $utilityFolders) {
-        if (Test-Path (Split-Path $dir -Parent)) { $destDir = $dir; break }
+        if (Test-Path (Split-Path $dir -Parent)) { $utilityDestDir = $dir; break }
     }
-
-    if (-not (Test-Path $destDir)) {
-        Write-Host "Creating: $destDir"
-        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+    if (-not (Test-Path $utilityDestDir)) {
+        Write-Host "Creating: $utilityDestDir"
+        New-Item -ItemType Directory -Path $utilityDestDir -Force | Out-Null
     }
-
-    $dest = Join-Path $destDir $fileName
+    $dest = Join-Path $utilityDestDir $fileName
     Copy-Item -LiteralPath $source -Destination $dest -Force
     Assert-LetsRampFile $dest
-    Write-Host "[ok] Installed: $dest"
+    Write-Host "[ok] Installed (Scripts Utility fallback): $dest"
+    $installed += $dest
 
     Write-Host ''
     Write-Host 'Installed successfully.' -ForegroundColor Green
@@ -144,11 +156,12 @@ try {
     } else {
         Write-Host '  1. Open DaVinci Resolve Studio.'
     }
-    Write-Host '  2. Menu: Workspace > Scripts > Utility > LetsRamp'
+    Write-Host '  2. Menu: Workspace > Workflow Integrations > LetsRamp'
+    Write-Host '     (fallback: Workspace > Scripts > Utility > LetsRamp)'
     Write-Host '  3. Select a clip on the timeline and pick a preset.'
     Write-Host ''
-    Write-Host 'Tip: click "Run diagnostics" in the panel and paste the result'
-    Write-Host 'into a GitHub issue - it helps support your Resolve version.'
+    Write-Host 'Tip: use Settings > Run diagnostics in the panel and paste the'
+    Write-Host 'result into a GitHub issue - it helps support your Resolve version.'
     Write-Host ''
     Read-Host 'Press Enter to close'
 }
@@ -157,9 +170,10 @@ catch {
     Write-Host "INSTALL FAILED: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host ''
     Write-Host 'Manual fallback:'
-    Write-Host "  1. Copy $fileName into one of these folders (create it if needed):"
-    foreach ($dir in $utilityFolders) { Write-Host "     $dir" }
-    Write-Host '  2. Restart Resolve. 3. Workspace > Scripts > Utility > LetsRamp'
+    Write-Host "  1. Copy $fileName into one of these folders (create if needed):"
+    foreach ($dir in ($wiFolders + $utilityFolders)) { Write-Host "     $dir" }
+    Write-Host '  2. Restart Resolve.'
+    Write-Host '  3. Workspace > Workflow Integrations > LetsRamp (or Scripts > Utility)'
     Write-Host ''
     Read-Host 'Press Enter to close'
     exit 1

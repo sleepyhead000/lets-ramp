@@ -48,7 +48,7 @@ except ImportError:
             except ImportError:
                 pass
 
-VERSION = "0.2.0-alpha"
+VERSION = "0.2.1-alpha"
 SPEED_MIN, SPEED_MAX = 0.01, 10.0
 DATA_DIR = Path.home() / ".lets-ramp"
 SETTINGS_PATH = DATA_DIR / "settings.json"
@@ -275,6 +275,110 @@ def tc_to_frames(tc, fps):
         return None
     h, mi, s, f = (int(x) for x in m.groups())
     return ((h * 60 + mi) * 60 + s) * int(round(fpsf)) + f
+
+
+SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
+
+
+def sparkline_html(keyframes, cols=64, rows=7):
+    kfs = normalize_keyframes(keyframes) if keyframes else [(0, 1.0, "linear"), (1, 1.0, "linear")]
+    speeds = [sample_speed(kfs, i / max(1, cols - 1)) for i in range(cols)]
+    lo, hi = min(speeds), max(speeds)
+    if hi - lo < 1e-6:
+        hi = lo + 1.0
+    grid = [[" "] * cols for _ in range(rows)]
+    colors = [["#ffcc33"] * cols for _ in range(rows)]
+    for c, sp in enumerate(speeds):
+        norm = (sp - lo) / (hi - lo)
+        r = int(round((1.0 - norm) * (rows - 1)))
+        r = min(rows - 1, max(0, r))
+        frac = norm * (rows - 1) - (rows - 1 - r)
+        block_idx = min(len(SPARK_BLOCKS) - 1, max(0, int(round(frac * (len(SPARK_BLOCKS) - 1)))))
+        grid[r][c] = SPARK_BLOCKS[block_idx]
+        colors[r][c] = "#66aaff" if sp < 0 else "#ffcc33" if sp >= 1.0 else "#cc9900"
+    lines = []
+    for r in range(rows):
+        parts = []
+        cur_color = None
+        run = []
+        for c in range(cols):
+            ch = grid[r][c]
+            col = colors[r][c] if ch != " " else None
+            if col != cur_color:
+                if run:
+                    parts.append('<span style="color:%s">%s</span>' % (cur_color, "".join(run)))
+                run = []
+                cur_color = col
+            run.append(ch)
+        if run:
+            if cur_color is None:
+                parts.append("".join(run))
+            else:
+                parts.append('<span style="color:%s">%s</span>' % (cur_color, "".join(run)))
+        lines.append("".join(parts))
+    footer = "min %d%%  max %d%%" % (round(lo * 100), round(hi * 100))
+    return ('<div style="font-family: Consolas, monospace; font-size: 13px;">%s</div>'
+            '<div style="color:#777777; font-size: 11px;">%s</div>'
+            % ("<br>".join(lines), footer))
+
+
+def fusion_ui_context(resolve):
+    errors = []
+    fusion = globals().get("fusion")
+    bmd = globals().get("bmd")
+    try:
+        import builtins
+        fusion = fusion or getattr(builtins, "fusion", None)
+        bmd = bmd or getattr(builtins, "bmd", None)
+    except Exception:
+        pass
+    if bmd is None:
+        try:
+            import DaVinciResolveScript as bmd
+        except Exception as e:
+            errors.append("import DaVinciResolveScript: %s: %s" % (type(e).__name__, e))
+    if fusion is None and bmd is not None:
+        try:
+            fusion = bmd.scriptapp("Fusion")
+            if fusion is None:
+                errors.append("scriptapp('Fusion') returned None")
+        except Exception as e:
+            errors.append("scriptapp('Fusion'): %s: %s" % (type(e).__name__, e))
+    if fusion is None:
+        try:
+            fusion = resolve.Fusion()
+            if fusion is None:
+                errors.append("resolve.Fusion() returned None")
+        except Exception as e:
+            errors.append("resolve.Fusion(): %s: %s" % (type(e).__name__, e))
+    if fusion is None:
+        return None, errors
+    ui = None
+    try:
+        ui = fusion.UIManager()
+    except Exception:
+        try:
+            ui = fusion.UIManager
+        except Exception as e:
+            errors.append("fusion.UIManager: %s: %s" % (type(e).__name__, e))
+    if ui is None:
+        return None, errors
+    dispatcher = None
+    for holder in (bmd, fusion, ui):
+        if holder is None:
+            continue
+        factory = getattr(holder, "UIDispatcher", None)
+        if callable(factory):
+            try:
+                dispatcher = factory(ui)
+                if dispatcher is not None:
+                    break
+            except Exception as e:
+                errors.append("UIDispatcher via %r: %s: %s" % (holder, type(e).__name__, e))
+    if dispatcher is None:
+        errors.append("UIDispatcher not found on bmd/fusion/ui")
+        return None, errors
+    return {"fusion": fusion, "bmd": bmd, "ui": ui, "dispatcher": dispatcher}, errors
 
 
 def load_json(path, default):
@@ -1752,11 +1856,629 @@ if QtWidgets is not None:
             self._open_log_dialog("Diagnostics", "%s\n%s\n\n%s" % (report, saved, clipped))
 
 
+class FusionPanel(object):
+    def __init__(self, resolve, ctx):
+        self.bridge = ResolveBridge(resolve)
+        self.ui = ctx["ui"]
+        self.dispatcher = ctx["dispatcher"]
+        self.settings = load_json(SETTINGS_PATH, {})
+        self.custom_presets = load_json(CUSTOM_PRESETS_PATH, [])
+        self.selected_preset_id = "hero-slowmo"
+        self.current_kf = [(0.0, 1.0, "linear"), (1.0, 1.0, "linear")]
+        self.selected_index = 0
+        self._syncing = False
+        self.el = {}
+        self.win = None
+        self._build()
+        self._rebuild_preset_combo()
+        info = self.bridge.get_clip_info()
+        self._update_clip_label(info)
+        preset = self._preset_by_id(self.selected_preset_id)
+        if preset:
+            self._load_preset(preset)
+
+    def all_presets(self):
+        out = list(PRESETS)
+        for cp in self.custom_presets:
+            p = dict(cp)
+            p["custom"] = True
+            p["tag"] = "Custom"
+            out.append(p)
+        return out
+
+    def _preset_by_id(self, pid):
+        for p in self.all_presets():
+            if p["id"] == pid:
+                return p
+        return None
+
+    def log(self, msg):
+        print("Let's Ramp: %s" % msg)
+        el = self.el.get("logEdit")
+        if el is not None:
+            try:
+                el.Append(str(msg))
+            except Exception:
+                try:
+                    el.Text = str(el.Text or "") + "\n" + str(msg)
+                except Exception:
+                    pass
+
+    def _wire(self, ident, event, fn):
+        try:
+            setattr(self.win.On[ident], event, fn)
+        except Exception as e:
+            self.log("wire %s.%s failed: %s: %s" % (ident, event, type(e).__name__, e))
+
+    def _read(self, ident, attr, default=None):
+        el = self.el.get(ident)
+        if el is None:
+            return default
+        for cand in (attr, "Get" + attr, "Is" + attr):
+            try:
+                v = getattr(el, cand)
+                return v() if callable(v) else v
+            except Exception:
+                continue
+        return default
+
+    def _write(self, ident, attr, value):
+        el = self.el.get(ident)
+        if el is None:
+            return False
+        for target in (attr, "Set" + attr):
+            try:
+                setattr(el, target, value)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _build(self):
+        ui = self.ui
+        self.presets = self.all_presets()
+
+        header = ui.HGroup({"Weight": 0}, [
+            ui.Label({"ID": "logo", "Text": "<b><span style='color:#ffcc33; font-size:16px'>LET'S RAMP</span></b> "
+                                            "<span style='color:#666666'>v%s</span>" % VERSION}),
+            ui.Label({"ID": "spacerHdr", "Text": ""}),
+        ])
+        clip_label = ui.Label({"ID": "clipLabel", "Text": "<span style='color:#aaaaaa'>No clip detected</span>"})
+
+        preset_row = ui.HGroup({"Weight": 0}, [
+            ui.Label({"ID": "presetLbl", "Text": "<b>PRESET</b>", "MinimumSize": [60, 20]}),
+            ui.ComboBox({"ID": "presetCombo"}),
+        ])
+        curve_label = ui.Label({"ID": "curveLabel", "Text": "", "Alignment": "AlignLeft"})
+        dur_label = ui.Label({"ID": "durLabel", "Text": "<span style='color:#aaaaaa'>output duration: -</span>"})
+
+        opt_row = ui.HGroup({"Weight": 0}, [
+            ui.CheckBox({"ID": "keepDurChk", "Text": "Keep duration"}),
+            ui.Label({"ID": "audioLbl", "Text": " Audio:"}),
+            ui.ComboBox({"ID": "audioCombo"}),
+        ])
+        quality_row1 = ui.HGroup({"Weight": 0}, [
+            ui.CheckBox({"ID": "ofChk", "Text": "Optical Flow", "Checked": True}),
+            ui.ComboBox({"ID": "ofModeCombo"}),
+            ui.CheckBox({"ID": "mbChk", "Text": "Motion Blur", "Checked": True}),
+        ])
+        quality_row2 = ui.HGroup({"Weight": 0}, [
+            ui.Label({"ID": "mbLbl", "Text": "Blur strength"}),
+            ui.Slider({"ID": "mbSlider", "Minimum": 0, "Maximum": 100, "Value": 50}),
+            ui.Label({"ID": "mbValLbl", "Text": "50%"}),
+        ])
+        action_row = ui.HGroup({"Weight": 0}, [
+            ui.Button({"ID": "rampBtn", "Text": "Ramp It", "Weight": 3}),
+            ui.Button({"ID": "undoBtn", "Text": "Undo", "Weight": 1}),
+            ui.Button({"ID": "refreshBtn", "Text": "Refresh", "Weight": 1}),
+            ui.Button({"ID": "diagBtn", "Text": "Diagnostics", "Weight": 1}),
+        ])
+        toast_label = ui.Label({"ID": "toastLabel", "Text": ""})
+
+        left = ui.VGroup({"Weight": 1}, [
+            preset_row, curve_label, dur_label, opt_row, quality_row1, quality_row2,
+            action_row, toast_label,
+        ])
+
+        kf_row1 = ui.HGroup({"Weight": 0}, [
+            ui.Label({"ID": "kfLbl", "Text": "<b>KEYFRAMES</b>"}),
+            ui.Label({"ID": "kfOfLbl", "Text": "keyframe"}),
+            ui.SpinBox({"ID": "kfIndexSpin", "Minimum": 1, "Maximum": 2, "Value": 1}),
+            ui.Label({"ID": "kfCountLbl", "Text": "of 2"}),
+        ])
+        kf_row2 = ui.HGroup({"Weight": 0}, [
+            ui.Label({"ID": "timeLbl", "Text": "Time %"}),
+            ui.LineEdit({"ID": "timeEdit", "Text": "0", "PlaceholderText": "0-100"}),
+            ui.Label({"ID": "speedLbl", "Text": "Speed %"}),
+            ui.LineEdit({"ID": "speedEdit", "Text": "100", "PlaceholderText": "-1000 to 1000"}),
+        ])
+        kf_row3 = ui.HGroup({"Weight": 0}, [
+            ui.Label({"ID": "easeLbl", "Text": "Ease"}),
+            ui.ComboBox({"ID": "easeCombo"}),
+            ui.Button({"ID": "addPlayheadBtn", "Text": "Add at playhead"}),
+        ])
+        kf_row4 = ui.HGroup({"Weight": 0}, [
+            ui.Button({"ID": "addBtn", "Text": "Add keyframe"}),
+            ui.Button({"ID": "removeBtn", "Text": "Remove"}),
+            ui.Button({"ID": "resetBtn", "Text": "Reset"}),
+        ])
+        kf_row5 = ui.HGroup({"Weight": 0}, [
+            ui.LineEdit({"ID": "nameEdit", "Text": "", "PlaceholderText": "preset name"}),
+            ui.Button({"ID": "savePresetBtn", "Text": "Save as preset"}),
+        ])
+        fx_row1 = ui.HGroup({"Weight": 0}, [
+            ui.Label({"ID": "fxLbl", "Text": "<b>EFFECTS</b> <span style='color:#cc8800'>(experimental)</span>"}),
+        ])
+        fx_row2 = ui.HGroup({"Weight": 0}, [
+            ui.Label({"ID": "fxSelLbl", "Text": "Effect"}),
+            ui.ComboBox({"ID": "fxCombo"}),
+        ])
+        fx_row3 = ui.HGroup({"Weight": 0}, [
+            ui.Label({"ID": "trSelLbl", "Text": "Transition"}),
+            ui.ComboBox({"ID": "trCombo"}),
+        ])
+        fx_row4 = ui.HGroup({"Weight": 0}, [
+            ui.Label({"ID": "intLbl", "Text": "Intensity"}),
+            ui.Slider({"ID": "intSlider", "Minimum": 0, "Maximum": 100, "Value": 50}),
+            ui.Label({"ID": "intValLbl", "Text": "50%"}),
+        ])
+        fx_row5 = ui.HGroup({"Weight": 0}, [
+            ui.Label({"ID": "plcLbl", "Text": "Placement"}),
+            ui.ComboBox({"ID": "placementCombo"}),
+        ])
+        fx_warn = ui.Label({
+            "ID": "fxWarn",
+            "Text": "<span style='color:#cc8800'>Applied with snapshot protection; "
+                    "may no-op on some Resolve versions (the log says what happened).</span>",
+        })
+        right = ui.VGroup({"Weight": 1}, [
+            kf_row1, kf_row2, kf_row3, kf_row4, kf_row5,
+            ui.Label({"ID": "gapLbl", "Text": ""}),
+            fx_row1, fx_row2, fx_row3, fx_row4, fx_row5, fx_warn,
+        ])
+
+        body = ui.HGroup({"Weight": 3}, [left, right])
+        log_lbl = ui.Label({"ID": "logLbl", "Text": "<b>LOG</b>"})
+        log_edit = ui.TextEdit({"ID": "logEdit", "Text": "", "ReadOnly": True, "Weight": 2})
+        root = ui.VGroup({"Weight": 1}, [
+            header, clip_label, body, log_lbl, log_edit,
+        ])
+
+        props = {"ID": "LetsRampWin", "WindowTitle": "Let's Ramp %s" % VERSION}
+        try:
+            self.win = self.dispatcher.AddWindow(dict(props, Geometry=[100, 80, 1040, 800]), root)
+        except Exception:
+            try:
+                self.win = self.dispatcher.AddWindow(props, root)
+            except Exception as e:
+                raise RuntimeError("AddWindow failed: %s: %s" % (type(e).__name__, e))
+        self.el = {}
+        try:
+            self.el = self.win.GetItems()
+        except Exception:
+            for ident in ("clipLabel", "presetCombo", "curveLabel", "durLabel", "keepDurChk",
+                          "audioCombo", "ofChk", "ofModeCombo", "mbChk", "mbSlider", "mbValLbl",
+                          "rampBtn", "undoBtn", "refreshBtn", "toastLabel", "kfIndexSpin",
+                          "kfCountLbl", "timeEdit", "speedEdit", "easeCombo", "addPlayheadBtn",
+                          "addBtn", "removeBtn", "resetBtn", "nameEdit", "savePresetBtn",
+                          "fxCombo", "trCombo", "intSlider", "intValLbl", "placementCombo",
+                          "logEdit"):
+                try:
+                    self.el[ident] = self.win.Find(ident)
+                except Exception:
+                    pass
+
+        try:
+            self.el["audioCombo"].AddItems(["keepPitch", "mute", "followSpeed"])
+            self.el["ofModeCombo"].AddItems(["Faster", "Better"])
+            self.el["easeCombo"].AddItems(list(EASINGS))
+            self.el["placementCombo"].AddItems(["at peak", "at start", "at end", "at playhead"])
+            self.el["fxCombo"].AddItems(["(none)"] + [e["name"] for e in EFFECTS])
+            self.el["trCombo"].AddItems(["(none)"] + [e["name"] for e in TRANSITIONS])
+        except Exception as e:
+            self.log("combo fill failed: %s: %s" % (type(e).__name__, e))
+
+        self._wire("LetsRampWin", "Close", self._on_close)
+        self._wire("presetCombo", "Activated", self._on_preset_activated)
+        self._wire("kfIndexSpin", "ValueChanged", self._on_index_spin)
+        self._wire("timeEdit", "EditingFinished", self._on_time_edit)
+        self._wire("timeEdit", "ReturnPressed", self._on_time_edit)
+        self._wire("speedEdit", "EditingFinished", self._on_speed_edit)
+        self._wire("speedEdit", "ReturnPressed", self._on_speed_edit)
+        self._wire("easeCombo", "Activated", self._on_ease_activated)
+        self._wire("addBtn", "Clicked", self._on_add)
+        self._wire("addPlayheadBtn", "Clicked", self._on_add_playhead)
+        self._wire("removeBtn", "Clicked", self._on_remove)
+        self._wire("resetBtn", "Clicked", self._on_reset)
+        self._wire("savePresetBtn", "Clicked", self._on_save_preset)
+        self._wire("rampBtn", "Clicked", self._on_ramp)
+        self._wire("undoBtn", "Clicked", self._on_undo)
+        self._wire("refreshBtn", "Clicked", self._on_refresh)
+        self._wire("diagBtn", "Clicked", self._on_diagnostics)
+        self._wire("mbSlider", "ValueChanged", self._on_mb_slider)
+        self._wire("intSlider", "ValueChanged", self._on_int_slider)
+
+        if self.settings:
+            self._write("ofChk", "Checked", bool(self.settings.get("opticalFlow", True)))
+            try:
+                want = ["Faster", "Better"].index(self.settings.get("ofMode", "Better"))
+                self.el["ofModeCombo"].CurrentIndex = want
+            except Exception:
+                pass
+            self._write("mbChk", "Checked", bool(self.settings.get("motionBlur", True)))
+            try:
+                self.el["mbSlider"].Value = int(round(float(self.settings.get("mbStrength", 0.5)) * 100))
+                self.el["mbValLbl"].Text = "%d%%" % self.el["mbSlider"].Value
+            except Exception:
+                pass
+            try:
+                audio = self.settings.get("audio", "keepPitch")
+                self.el["audioCombo"].CurrentIndex = ["keepPitch", "mute", "followSpeed"].index(audio)
+            except Exception:
+                pass
+
+    def run(self):
+        self.win.Show()
+        self.dispatcher.RunLoop()
+
+    def _on_close(self, _ev):
+        self.dispatcher.ExitLoop()
+
+    def toast(self, message):
+        try:
+            self.el["toastLabel"].Text = "<span style='color:#ffcc33'>%s</span>" % message
+        except Exception:
+            pass
+
+    def _rebuild_preset_combo(self):
+        self.presets = self.all_presets()
+        try:
+            combo = self.el["presetCombo"]
+            combo.Clear()
+            combo.AddItems(["%s [%s]" % (p["name"], p.get("tag", "")) for p in self.presets])
+            for i, p in enumerate(self.presets):
+                if p["id"] == self.selected_preset_id:
+                    combo.CurrentIndex = i
+                    break
+        except Exception as e:
+            self.log("preset combo rebuild failed: %s: %s" % (type(e).__name__, e))
+
+    def _on_preset_activated(self, _ev=None):
+        if self._syncing:
+            return
+        idx = int(self._read("presetCombo", "CurrentIndex", 0) or 0)
+        if 0 <= idx < len(self.presets):
+            self.selected_preset_id = self.presets[idx]["id"]
+            self._load_preset(self.presets[idx])
+
+    def _load_preset(self, preset):
+        self.current_kf = normalize_keyframes(preset["keyframes"])
+        self.selected_index = 0
+        q = preset.get("quality", {})
+        self._write("ofChk", "Checked", bool(q.get("opticalFlow", True)))
+        self._write("mbChk", "Checked", bool(q.get("motionBlur", True)))
+        try:
+            self.el["mbSlider"].Value = int(round(float(q.get("mbStrength", 0.5)) * 100))
+            self.el["mbValLbl"].Text = "%d%%" % self.el["mbSlider"].Value
+        except Exception:
+            pass
+        try:
+            self.el["ofModeCombo"].CurrentIndex = ["Faster", "Better"].index(q.get("ofMode", "Better"))
+            self.el["audioCombo"].CurrentIndex = ["keepPitch", "mute", "followSpeed"].index(
+                preset.get("audio", "keepPitch"))
+        except Exception:
+            pass
+        try:
+            fx = preset.get("fx") or []
+            self.el["fxCombo"].CurrentIndex = 0
+            if fx:
+                for i, meta in enumerate(EFFECTS):
+                    if meta["id"] == fx[0]:
+                        self.el["fxCombo"].CurrentIndex = i + 1
+                        break
+        except Exception:
+            pass
+        self._refresh_curve()
+
+    def current_keyframes(self):
+        return normalize_keyframes(self.current_kf)
+
+    def _refresh_curve(self):
+        kfs = self.current_keyframes()
+        try:
+            self.el["curveLabel"].Text = sparkline_html(kfs)
+        except Exception as e:
+            self.log("curve render failed: %s: %s" % (type(e).__name__, e))
+        info = self.bridge.get_clip_info()
+        try:
+            if info:
+                r = integrate(kfs, info["frames"])
+                self.el["durLabel"].Text = (
+                    "<span style='color:#aaaaaa'>output: %s frames (%s) &nbsp;|&nbsp; "
+                    "speed %d%% to %d%% &nbsp;|&nbsp; source %d frames</span>"
+                    % (r["out_frames"], frames_to_tc(r["out_frames"], info["fps"]),
+                       round(r["min"] * 100), round(r["max"] * 100), info["frames"]))
+            else:
+                self.el["durLabel"].Text = "<span style='color:#aaaaaa'>select a clip to compute duration</span>"
+        except Exception as e:
+            self.log("duration update failed: %s: %s" % (type(e).__name__, e))
+        self._sync_kf_fields()
+
+    def _sync_kf_fields(self):
+        kfs = self.current_keyframes()
+        n = len(kfs)
+        self.selected_index = min(self.selected_index, n - 1)
+        self._syncing = True
+        try:
+            self.el["kfIndexSpin"].SetRange(1, max(1, n))
+            self.el["kfIndexSpin"].Value = self.selected_index + 1
+            self.el["kfCountLbl"].Text = "of %d" % n
+            t, spd, ease = kfs[self.selected_index]
+            self.el["timeEdit"].Text = "%.2f" % (t * 100.0)
+            self.el["speedEdit"].Text = "%.1f" % (spd * 100.0)
+            self.el["easeCombo"].CurrentIndex = list(EASINGS).index(ease) if ease in EASINGS else 0
+        except Exception as e:
+            self.log("keyframe field sync failed: %s: %s" % (type(e).__name__, e))
+        finally:
+            self._syncing = False
+
+    def _set_kf(self, index, t=None, speed=None, ease=None):
+        kfs = [list(k) for k in self.current_keyframes()]
+        if not (0 <= index < len(kfs)):
+            return
+        kf = kfs[index]
+        if t is not None:
+            kf[0] = min(1.0, max(0.0, float(t)))
+        if speed is not None:
+            kf[1] = clamp_speed(speed)
+        if ease is not None and ease in EASINGS:
+            kf[2] = ease
+        self.current_kf = normalize_keyframes(kfs)
+        idx_t = min(1.0, max(0.0, kf[0]))
+        for i, k in enumerate(self.current_keyframes()):
+            if abs(k[0] - idx_t) < 1e-9:
+                self.selected_index = i
+                break
+        self._refresh_curve()
+
+    def _on_index_spin(self, _ev=None):
+        if self._syncing:
+            return
+        try:
+            self.selected_index = max(0, int(self._read("kfIndexSpin", "Value", 1)) - 1)
+        except Exception:
+            return
+        self._sync_kf_fields()
+
+    def _parse_float(self, ident, default):
+        raw = str(self._read(ident, "Text", "") or "").strip().replace("%", "")
+        try:
+            return float(raw)
+        except ValueError:
+            return default
+
+    def _on_time_edit(self, _ev=None):
+        if self._syncing:
+            return
+        cur = self.current_keyframes()[self.selected_index]
+        t = self._parse_float("timeEdit", cur[0] * 100.0) / 100.0
+        self._set_kf(self.selected_index, t=t)
+
+    def _on_speed_edit(self, _ev=None):
+        if self._syncing:
+            return
+        cur = self.current_keyframes()[self.selected_index]
+        spd = self._parse_float("speedEdit", cur[1] * 100.0) / 100.0
+        self._set_kf(self.selected_index, speed=spd)
+
+    def _on_ease_activated(self, _ev=None):
+        if self._syncing:
+            return
+        idx = int(self._read("easeCombo", "CurrentIndex", 0) or 0)
+        if 0 <= idx < len(EASINGS):
+            self._set_kf(self.selected_index, ease=EASINGS[idx])
+
+    def _on_add(self, _ev=None):
+        kfs = [list(k) for k in self.current_keyframes()]
+        base_t = kfs[self.selected_index][0]
+        new_t = min(1.0, base_t + 0.1)
+        if new_t <= kfs[-1][0] - 1e-6:
+            kfs.append([new_t, kfs[self.selected_index][1], "linear"])
+        else:
+            insert_at = max(0, self.selected_index)
+            prev_t = kfs[insert_at][0]
+            alt = prev_t - 0.1
+            if alt > 0:
+                kfs.append([alt, kfs[insert_at][1], "linear"])
+        self.current_kf = normalize_keyframes(kfs)
+        self._refresh_curve()
+        self.toast("Keyframe added.")
+
+    def _on_add_playhead(self, _ev=None):
+        info = self.bridge.get_clip_info()
+        t = self.bridge.get_playhead_t(info) if info else None
+        if t is None:
+            self.toast("Playhead position not readable - use Time % instead.")
+            return
+        kfs = [list(k) for k in self.current_keyframes()]
+        kfs.append([t, kfs[self.selected_index][1], "linear"])
+        self.current_kf = normalize_keyframes(kfs)
+        for i, k in enumerate(self.current_keyframes()):
+            if abs(k[0] - t) < 1e-6:
+                self.selected_index = i
+        self._refresh_curve()
+
+    def _on_remove(self, _ev=None):
+        kfs = [list(k) for k in self.current_keyframes()]
+        if len(kfs) <= 2:
+            self.toast("A ramp needs at least 2 keyframes.")
+            return
+        del kfs[self.selected_index]
+        self.current_kf = normalize_keyframes(kfs)
+        self.selected_index = min(self.selected_index, len(self.current_kf) - 1)
+        self._refresh_curve()
+
+    def _on_reset(self, _ev=None):
+        self.current_kf = [(0.0, 1.0, "linear"), (1.0, 1.0, "linear")]
+        self.selected_index = 0
+        self._refresh_curve()
+        self.toast("Curve reset to linear.")
+
+    def _on_save_preset(self, _ev=None):
+        name = str(self._read("nameEdit", "Text", "") or "").strip()
+        if not name:
+            self.toast("Type a preset name first.")
+            return
+        pid = "custom-%s" % re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+        q = {
+            "opticalFlow": bool(self._read("ofChk", "Checked", True)),
+            "ofMode": ["Faster", "Better"][int(self._read("ofModeCombo", "CurrentIndex", 1) or 0)],
+            "motionBlur": bool(self._read("mbChk", "Checked", True)),
+            "mbStrength": (int(self._read("mbSlider", "Value", 50)) or 50) / 100.0,
+        }
+        audio = ["keepPitch", "mute", "followSpeed"][int(self._read("audioCombo", "CurrentIndex", 0) or 0)]
+        preset = {
+            "id": pid,
+            "name": name,
+            "tag": "Custom",
+            "keyframes": [[t, s, e] for t, s, e in self.current_keyframes()],
+            "quality": q,
+            "audio": audio,
+            "fx": [],
+        }
+        self.custom_presets = [p for p in self.custom_presets if p["id"] != pid]
+        self.custom_presets.append(preset)
+        save_json(CUSTOM_PRESETS_PATH, self.custom_presets)
+        self.selected_preset_id = pid
+        self._rebuild_preset_combo()
+        self._write("nameEdit", "Text", "")
+        self.toast("Saved preset '%s'." % name)
+
+    def _on_mb_slider(self, _ev=None):
+        try:
+            self.el["mbValLbl"].Text = "%d%%" % int(self.el["mbSlider"].Value)
+        except Exception:
+            pass
+
+    def _on_int_slider(self, _ev=None):
+        try:
+            self.el["intValLbl"].Text = "%d%%" % int(self.el["intSlider"].Value)
+        except Exception:
+            pass
+
+    def _update_clip_label(self, info):
+        try:
+            if info:
+                self.el["clipLabel"].Text = (
+                    "<span style='color:#aaaaaa'>Clip: %s &nbsp;|&nbsp; %d frames @ %.3f fps "
+                    "&nbsp;|&nbsp; %s</span>"
+                    % (info["name"], info["frames"], info["fps"],
+                       frames_to_tc(info["frames"], info["fps"])))
+            else:
+                self.el["clipLabel"].Text = (
+                    "<span style='color:#aaaaaa'>No clip detected - select a clip on the timeline</span>")
+        except Exception as e:
+            self.log("clip label failed: %s: %s" % (type(e).__name__, e))
+        studio = self.bridge.is_studio()
+        self._write("rampBtn", "Enabled", studio)
+        if not studio:
+            self.toast("Free Resolve detected - Let's Ramp needs Studio.")
+
+    def _on_refresh(self, _ev=None):
+        info = self.bridge.get_clip_info()
+        self._update_clip_label(info)
+        self._refresh_curve()
+        self.toast("Refreshed.")
+
+    def _quality_from_widgets(self):
+        return {
+            "opticalFlow": bool(self._read("ofChk", "Checked", True)),
+            "ofMode": ["Faster", "Better"][int(self._read("ofModeCombo", "CurrentIndex", 1) or 0)],
+            "motionBlur": bool(self._read("mbChk", "Checked", True)),
+            "mbStrength": (int(self._read("mbSlider", "Value", 50)) or 50) / 100.0,
+        }
+
+    def _on_ramp(self, _ev=None):
+        info = self.bridge.get_clip_info()
+        if not info:
+            self.toast("Select a clip on the timeline first.")
+            return
+        quality = self._quality_from_widgets()
+        audio = ["keepPitch", "mute", "followSpeed"][int(self._read("audioCombo", "CurrentIndex", 0) or 0)]
+        keep_dur = bool(self._read("keepDurChk", "Checked", False))
+        self.log("--- Ramp It ---")
+        try:
+            outcome = self.bridge.apply_ramp(info, self.current_keyframes(), quality, audio,
+                                             keep_duration=keep_dur)
+            fx = []
+            fx_idx = int(self._read("fxCombo", "CurrentIndex", 0) or 0)
+            if fx_idx > 0:
+                meta = EFFECTS[fx_idx - 1]
+                fx.append((meta["id"], {
+                    "enabled": True,
+                    "intensity": (int(self._read("intSlider", "Value", 50)) or 50) / 100.0,
+                    "placement": ["at peak", "at start", "at end", "at playhead"][
+                        int(self._read("placementCombo", "CurrentIndex", 0) or 0)],
+                }))
+            tr_idx = int(self._read("trCombo", "CurrentIndex", 0) or 0)
+            if tr_idx > 0:
+                meta = TRANSITIONS[tr_idx - 1]
+                fx.append((meta["id"], {
+                    "enabled": True,
+                    "intensity": (int(self._read("intSlider", "Value", 50)) or 50) / 100.0,
+                    "placement": ["at peak", "at start", "at end", "at playhead"][
+                        int(self._read("placementCombo", "CurrentIndex", 0) or 0)],
+                }))
+            applied_fx = []
+            if fx and outcome["ok"]:
+                applied_fx = self.bridge.apply_effects(info, fx)
+            if outcome["ok"]:
+                msg = "Applied -> %s frames." % outcome["result"]["out_frames"]
+                if applied_fx:
+                    msg += " FX: %s." % ", ".join(applied_fx)
+                self.toast(msg + " Undo restores the clip.")
+            else:
+                self.toast("Apply failed on this Resolve version - clip restored. See log.")
+        except Exception:
+            err = traceback.format_exc()
+            try:
+                self.bridge.restore_snapshot(info["item"])
+            except Exception:
+                pass
+            self.log(err)
+            self.toast("Unexpected error - clip restored. See log.")
+        info = self.bridge.get_clip_info()
+        self._update_clip_label(info)
+        self._refresh_curve()
+
+    def _on_undo(self, _ev=None):
+        n = self.bridge.restore_snapshot()
+        if n:
+            self.toast("Restored %d properties." % n)
+        else:
+            self.toast("Nothing to undo yet - apply a ramp first.")
+
+    def _on_diagnostics(self, _ev=None):
+        info = self.bridge.get_clip_info()
+        report = self.bridge.diagnostics(info)
+        out = Path.home() / "lets-ramp-diagnostics.txt"
+        try:
+            out.write_text(report, encoding="utf-8")
+            self.toast("Diagnostics saved to %s" % out)
+        except Exception as e:
+            self.toast("Could not save diagnostics: %s" % e)
+        try:
+            self.el["logEdit"].Text = report
+        except Exception:
+            self.log(report)
+
+
 DIALOG = None
+PANEL = None
 
 
 def main():
-    global DIALOG
+    global DIALOG, PANEL
     resolve = globals().get("resolve")
     if resolve is None:
         resolve = get_resolve()
@@ -1765,19 +2487,33 @@ def main():
         print("Workspace > Workflow Integrations or Workspace > Scripts > Utility")
         print("INSIDE DaVinci Resolve Studio.")
         return
-    if QtWidgets is None:
-        print("Let's Ramp: no Qt bindings found inside Resolve's Python.")
+    if QtWidgets is not None:
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication(sys.argv)
+        if DIALOG is not None:
+            try:
+                DIALOG.close()
+            except Exception:
+                pass
+        DIALOG = LetsRampWindow(resolve)
+        DIALOG.show()
         return
-    app = QtWidgets.QApplication.instance()
-    if app is None:
-        app = QtWidgets.QApplication(sys.argv)
-    if DIALOG is not None:
+    print("Let's Ramp: no Qt bindings - using Resolve's built-in UIManager UI.")
+    ctx, errors = fusion_ui_context(resolve)
+    if ctx is None:
+        msg = ("Let's Ramp could not create a UI on this Resolve version.\n"
+               + "\n".join("- %s" % e for e in errors))
+        print(msg)
         try:
-            DIALOG.close()
+            (Path.home() / "lets-ramp-crash.txt").write_text(msg, encoding="utf-8")
+            print("Details written to %s" % (Path.home() / "lets-ramp-crash.txt"))
         except Exception:
             pass
-    DIALOG = LetsRampWindow(resolve)
-    DIALOG.show()
+        return
+    print("Let's Ramp: UIManager ready (%r)." % ctx["fusion"])
+    PANEL = FusionPanel(resolve, ctx)
+    PANEL.run()
 
 
 def _should_autorun():

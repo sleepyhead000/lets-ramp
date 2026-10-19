@@ -241,5 +241,38 @@ class TestPresets(unittest.TestCase):
                 self.assertIn(fx, known, "%s references unknown fx %s" % (p["id"], fx))
 
 
+class TestSparkline(unittest.TestCase):
+    def test_basic_render(self):
+        html = lr.sparkline_html([(0, 1.0, "linear"), (1, 1.0, "linear")])
+        self.assertIn("min", html)
+        self.assertIn("max", html)
+        self.assertIn("Consolas", html)
+
+    def test_constant_1x_line(self):
+        html = lr.sparkline_html([(0, 1.0, "linear"), (1, 1.0, "linear")], cols=16, rows=5)
+        self.assertIn("▁", html)
+        self.assertIn("100%", html)
+        self.assertNotIn("#66aaff", html)
+
+    def test_negative_speeds_blue(self):
+        html = lr.sparkline_html([(0, 1.0, "linear"), (0.5, -1.0, "linear"), (1, 1.0, "linear")])
+        self.assertIn("#66aaff", html)
+
+    def test_ramp_shaped_curve_multi_row(self):
+        html = lr.sparkline_html([(0, 4.0, "linear"), (1, 0.2, "linear")], cols=32, rows=8)
+        self.assertIn("#ffcc33", html)
+        self.assertIn("400", html)
+        self.assertIn("20", html)
+
+    def test_empty_keyframes_defaults(self):
+        html = lr.sparkline_html([])
+        self.assertIn("min", html)
+
+    def test_no_qt_backend_probe_safe(self):
+        ctx, errors = lr.fusion_ui_context(None)
+        self.assertIsNone(ctx)
+        self.assertIsInstance(errors, list)
+
+
 if __name__ == "__main__":
     unittest.main()

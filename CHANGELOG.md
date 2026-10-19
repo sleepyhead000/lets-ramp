@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.1-alpha
+
+Fix: the panel now opens on Resolve builds without Python Qt bindings
+(e.g. Resolve 18.6 Windows).
+
+### Added
+- **Fusion UIManager backend**: when PySide/PyQt is not importable
+  inside Resolve's Python (Resolve 18.x ships none), the panel now
+  builds itself with Resolve's built-in UIManager instead - the same
+  toolkit Blackmagic's own Workflow Integration sample uses. Same
+  features: preset combo with live curve sparkline, duration math,
+  numeric keyframe editor (index/time/speed/ease), add at playhead,
+  custom preset save, quality controls, effects + transitions
+  selectors, Ramp It / Undo / Refresh / Diagnostics, log pane
+- Backend selection is automatic: Qt window when bindings exist,
+  UIManager window otherwise; failure logs exactly which UI object
+  was missing (also written to `~/lets-ramp-crash.txt`)
+- 51 plugin engine tests (sparkline renderer + UI context probe)
+
 ## 0.2.0-alpha
 
 The plugin becomes a real panel: full-screen UI, precise curve editing,

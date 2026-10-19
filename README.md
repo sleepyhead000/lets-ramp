@@ -11,18 +11,30 @@ Pick a preset, see the curve and new duration, hit **Ramp It**.
 > scripting API actually allows; we are collecting that data via
 > diagnostics ([feasibility spikes](02-feasibility-and-spikes.md)).
 
-## Install (2 minutes, no Python needed)
+## Install (30 seconds, no Python needed)
 
 Resolve ships its own Python - you do **not** install anything extra.
 
+### Windows
 1. Download **lets-ramp-plugin.zip** from the
    [latest release](../../releases/latest) and extract it.
-2. Copy `LetsRamp.py` into Resolve's Scripts/Utility folder:
-   - **Windows:** `%PROGRAMDATA%\Blackmagic Design\DaVinci Resolve\Support\Editor Pages\Scripts\Utility`
-   - **macOS:** `/Library/Application Support/Blackmagic Design/DaVinci Resolve/Support/Editor Pages/Scripts/Utility`
-   - Step-by-step: [Windows](plugin/INSTALL-WINDOWS.md) · [macOS](plugin/INSTALL-MAC.md)
+2. Double-click **Install-LetsRamp.cmd** (accept the UAC prompt).
+3. Open (or restart) Resolve Studio.
+4. Menu: **Workspace > Scripts > Utility > LetsRamp**.
+
+Details, uninstall, troubleshooting: [plugin/INSTALL-WINDOWS.md](plugin/INSTALL-WINDOWS.md)
+
+### macOS
+1. Download and extract the release zip.
+2. In Terminal, from the extracted folder:
+   ```bash
+   sudo mkdir -p "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Support/Editor Pages/Scripts/Utility"
+   sudo cp LetsRamp.py "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Support/Editor Pages/Scripts/Utility/"
+   ```
 3. Restart Resolve Studio.
 4. Menu: **Workspace > Scripts > Utility > LetsRamp**.
+
+Details: [plugin/INSTALL-MAC.md](plugin/INSTALL-MAC.md)
 
 ## Use
 

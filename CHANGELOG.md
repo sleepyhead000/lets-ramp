@@ -5,6 +5,10 @@
 First public release. Installable Resolve script + engine + spike harness.
 
 ### Added
+- `plugin/Install-LetsRamp.cmd` + `Install-LetsRamp.ps1` - one-click
+  Windows installer: finds Resolve, creates the Utility folder, copies
+  the script (downloads it from GitHub if missing), verifies the file,
+  supports `-Uninstall`
 - `plugin/LetsRamp.py` - DaVinci Resolve Studio utility script:
   - 10 starter presets with live speed-curve preview
   - output-duration calculation (integral of 1/speed)

@@ -48,7 +48,7 @@ except ImportError:
             except ImportError:
                 pass
 
-VERSION = "0.2.2-alpha"
+VERSION = "0.2.3-alpha"
 SPEED_MIN, SPEED_MAX = 0.01, 10.0
 DATA_DIR = Path.home() / ".lets-ramp"
 SETTINGS_PATH = DATA_DIR / "settings.json"
@@ -376,25 +376,59 @@ def fusion_ui_context(resolve):
         log("EXIT", "no Fusion object obtained")
         return None, errors
     ui = None
+    chosen = None
+    candidates = []
     try:
-        mgr_attr = getattr(fusion, "UIManager", None)
-        log("getattr(fusion, 'UIManager')", "%s %s" % (type(mgr_attr).__name__,
-                                                       "callable" if callable(mgr_attr) else "value"))
-        if callable(mgr_attr):
-            try:
-                ui = mgr_attr()
-                log("fusion.UIManager()", "returned %s" % type(ui).__name__)
-            except Exception as e:
-                log("FAIL fusion.UIManager()", "%s: %s" % (type(e).__name__, e))
-        else:
-            ui = mgr_attr
-        if ui is None:
-            log("FAIL UIManager", "is None (attr=%s)" % safe_repr(mgr_attr))
+        mgr = getattr(fusion, "UIManager", None)
+        log("getattr(fusion, 'UIManager')", "%s %s" % (type(mgr).__name__,
+                                                       "callable" if callable(mgr) else "value"))
+        candidates.append(("attribute", mgr))
     except Exception as e:
         log("FAIL getattr(fusion, 'UIManager')", "%s: %s" % (type(e).__name__, e))
+        mgr = None
+    if callable(mgr):
+        try:
+            called = mgr()
+            log("fusion.UIManager()", "returned %s" % type(called).__name__)
+            candidates.append(("call()", called))
+        except Exception as e:
+            log("FAIL fusion.UIManager()", "%s: %s" % (type(e).__name__, e))
+
+    def usable(what, cand):
+        if cand is None:
+            log("skip candidate", "%s is None" % what)
+            return False
+        try:
+            factory = getattr(cand, "Label", None)
+            if factory is None:
+                log("not usable", "%s has no .Label" % what)
+                return False
+            probe = factory({"Text": "probe"})
+            if probe is None:
+                log("not usable", "%s.Label() returned None" % what)
+                return False
+            log("usable candidate", "%s (Label -> %s)" % (what, type(probe).__name__))
+            return True
+        except Exception as e:
+            log("not usable", "%s: %s: %s" % (what, type(e).__name__, e))
+            return False
+
+    for what, cand in candidates:
+        if usable(what, cand):
+            ui = cand
+            chosen = what
+            break
     if ui is None:
-        log("EXIT", "no UIManager")
+        try:
+            names = [str(n) for n in dir(fusion) if "UI" in str(n) or "Window" in str(n)]
+            log("hint dir(fusion)", str(names[:40]))
+        except Exception as e:
+            log("hint dir(fusion) failed", "%s: %s" % (type(e).__name__, e))
+    if ui is None:
+        log("EXIT", "no usable UIManager (tried: %s)"
+            % (", ".join(w for w, _ in candidates) or "nothing"))
         return None, errors
+    log("UIManager selected via", chosen)
     dispatcher = None
     for holder_name in ("bmd", "fusion", "ui"):
         holder = {"bmd": bmd, "fusion": fusion, "ui": ui}[holder_name]
@@ -1946,10 +1980,21 @@ class FusionPanel(object):
                     pass
 
     def _wire(self, ident, event, fn):
+        el = self.el.get(ident)
+        first = "no element"
+        if el is not None:
+            try:
+                setattr(el.On, event, fn)
+                return True
+            except Exception as e:
+                first = "element: %s: %s" % (type(e).__name__, e)
         try:
-            setattr(self.win.On[ident], event, fn)
+            setattr(self.win.On[ident].Event, event, fn)
+            return True
         except Exception as e:
-            self.log("wire %s.%s failed: %s: %s" % (ident, event, type(e).__name__, e))
+            self.log("wire %s.%s failed (%s) | window: %s: %s"
+                     % (ident, event, first, type(e).__name__, e))
+            return False
 
     def _read(self, ident, attr, default=None):
         el = self.el.get(ident)

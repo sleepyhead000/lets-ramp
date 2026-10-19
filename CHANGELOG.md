@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.3-alpha
+
+Fix: the UIManager is now obtained the way Blackmagic documents it.
+
+### Fixed
+- On Resolve 18.6 the injected `fusion` object exposes `UIManager` as
+  a **property** (`ui = fu.UIManager`), but the probe *called* it
+  (`fusion.UIManager()`) and got `None` back - the cause of
+  "could not create a UI". The probe now tries the attribute
+  **without calling first** (documented pattern), falls back to the
+  call form for builds where it is a method, and accepts a candidate
+  only after a real usability check (`Label({...})` factory returns
+  an element). Every attempt is logged with its outcome
+- Event wiring used a non-existent form
+  (`win.On[id].Event = fn`). It now uses the documented element form
+  (`elm.On.Clicked = fn`) first, then the window form
+  (`win.On[id].Event.Close = fn`), logging any failure per event
+- Failure now prints a `dir(fusion)` hint listing UI/Window members so
+  a future version mismatch identifies itself immediately
+
+### Added
+- 4 more probe tests (property manager, method manager, unusable
+  manager, failing Label factory) - 55 total
+
 ## 0.2.2-alpha
 
 Diagnostics release: the silent UI-probe failure is impossible now.

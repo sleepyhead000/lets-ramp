@@ -274,5 +274,73 @@ class TestSparkline(unittest.TestCase):
         self.assertIsInstance(errors, list)
 
 
+class TestFusionContext(unittest.TestCase):
+    MISSING = object()
+
+    def setUp(self):
+        self._saved = {k: getattr(lr, k, self.MISSING) for k in ("fusion", "bmd")}
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is self.MISSING:
+                if hasattr(lr, k):
+                    delattr(lr, k)
+            else:
+                setattr(lr, k, v)
+
+    class FakeMgr(object):
+        def Label(self, opts):
+            return "ELEM"
+
+    class FakeBmd(object):
+        def UIDispatcher(self, ui):
+            return object() if ui is not None else None
+
+    def test_property_manager_used_without_calling(self):
+        class F(object):
+            UIManager = TestFusionContext.FakeMgr()
+
+        lr.fusion, lr.bmd = F(), TestFusionContext.FakeBmd()
+        ctx, log = lr.fusion_ui_context(object())
+        self.assertIsNotNone(ctx)
+        self.assertIsInstance(ctx["ui"], TestFusionContext.FakeMgr)
+        self.assertIn("UIManager selected via", "\n".join(log))
+
+    def test_method_manager_used_via_call(self):
+        class F(object):
+            def UIManager(self):
+                return TestFusionContext.FakeMgr()
+
+        lr.fusion, lr.bmd = F(), TestFusionContext.FakeBmd()
+        ctx, log = lr.fusion_ui_context(object())
+        self.assertIsNotNone(ctx)
+        self.assertIsInstance(ctx["ui"], TestFusionContext.FakeMgr)
+        self.assertIn("call()", "\n".join(log))
+
+    def test_unusable_manager_exits_with_log(self):
+        class F(object):
+            UIManager = None
+
+        lr.fusion, lr.bmd = F(), TestFusionContext.FakeBmd()
+        ctx, log = lr.fusion_ui_context(object())
+        self.assertIsNone(ctx)
+        text = "\n".join(log)
+        self.assertIn("EXIT", text)
+        self.assertIn("no usable UIManager", text)
+
+    def test_label_factory_failing_marks_not_usable(self):
+        class Broken(object):
+            def Label(self, opts):
+                return None
+
+        class F(object):
+            UIManager = Broken()
+
+        lr.fusion, lr.bmd = F(), TestFusionContext.FakeBmd()
+        ctx, log = lr.fusion_ui_context(object())
+        self.assertIsNone(ctx)
+        self.assertIn("returned None", "\n".join(log))
+
+
 if __name__ == "__main__":
     unittest.main()

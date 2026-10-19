@@ -48,7 +48,7 @@ except ImportError:
             except ImportError:
                 pass
 
-VERSION = "0.2.1-alpha"
+VERSION = "0.2.2-alpha"
 SPEED_MIN, SPEED_MAX = 0.01, 10.0
 DATA_DIR = Path.home() / ".lets-ramp"
 SETTINGS_PATH = DATA_DIR / "settings.json"
@@ -324,8 +324,22 @@ def sparkline_html(keyframes, cols=64, rows=7):
 
 def fusion_ui_context(resolve):
     errors = []
+
+    def log(step, detail=""):
+        errors.append(step + (": " + detail if detail else ""))
+
+    def safe_repr(obj, limit=160):
+        try:
+            r = repr(obj)
+        except Exception as e:
+            return "<repr failed: %s>" % e
+        if len(r) > limit:
+            r = r[:limit] + "..."
+        return r
+
     fusion = globals().get("fusion")
     bmd = globals().get("bmd")
+    log("probe globals", "fusion=%s bmd=%s" % (type(fusion).__name__, type(bmd).__name__))
     try:
         import builtins
         fusion = fusion or getattr(builtins, "fusion", None)
@@ -335,48 +349,75 @@ def fusion_ui_context(resolve):
     if bmd is None:
         try:
             import DaVinciResolveScript as bmd
+            log("import DaVinciResolveScript", "OK %s" % safe_repr(bmd))
         except Exception as e:
-            errors.append("import DaVinciResolveScript: %s: %s" % (type(e).__name__, e))
+            log("FAIL import DaVinciResolveScript", "%s: %s" % (type(e).__name__, e))
+    else:
+        log("bmd already present", safe_repr(bmd))
     if fusion is None and bmd is not None:
         try:
             fusion = bmd.scriptapp("Fusion")
             if fusion is None:
-                errors.append("scriptapp('Fusion') returned None")
+                log("FAIL bmd.scriptapp('Fusion')", "returned None")
+            else:
+                log("bmd.scriptapp('Fusion')", "OK %s" % safe_repr(fusion))
         except Exception as e:
-            errors.append("scriptapp('Fusion'): %s: %s" % (type(e).__name__, e))
+            log("FAIL bmd.scriptapp('Fusion')", "%s: %s" % (type(e).__name__, e))
     if fusion is None:
         try:
             fusion = resolve.Fusion()
             if fusion is None:
-                errors.append("resolve.Fusion() returned None")
+                log("FAIL resolve.Fusion()", "returned None")
+            else:
+                log("resolve.Fusion()", "OK %s" % safe_repr(fusion))
         except Exception as e:
-            errors.append("resolve.Fusion(): %s: %s" % (type(e).__name__, e))
+            log("FAIL resolve.Fusion()", "%s: %s" % (type(e).__name__, e))
     if fusion is None:
+        log("EXIT", "no Fusion object obtained")
         return None, errors
     ui = None
     try:
-        ui = fusion.UIManager()
-    except Exception:
-        try:
-            ui = fusion.UIManager
-        except Exception as e:
-            errors.append("fusion.UIManager: %s: %s" % (type(e).__name__, e))
+        mgr_attr = getattr(fusion, "UIManager", None)
+        log("getattr(fusion, 'UIManager')", "%s %s" % (type(mgr_attr).__name__,
+                                                       "callable" if callable(mgr_attr) else "value"))
+        if callable(mgr_attr):
+            try:
+                ui = mgr_attr()
+                log("fusion.UIManager()", "returned %s" % type(ui).__name__)
+            except Exception as e:
+                log("FAIL fusion.UIManager()", "%s: %s" % (type(e).__name__, e))
+        else:
+            ui = mgr_attr
+        if ui is None:
+            log("FAIL UIManager", "is None (attr=%s)" % safe_repr(mgr_attr))
+    except Exception as e:
+        log("FAIL getattr(fusion, 'UIManager')", "%s: %s" % (type(e).__name__, e))
     if ui is None:
+        log("EXIT", "no UIManager")
         return None, errors
     dispatcher = None
-    for holder in (bmd, fusion, ui):
+    for holder_name in ("bmd", "fusion", "ui"):
+        holder = {"bmd": bmd, "fusion": fusion, "ui": ui}[holder_name]
         if holder is None:
             continue
         factory = getattr(holder, "UIDispatcher", None)
-        if callable(factory):
-            try:
-                dispatcher = factory(ui)
-                if dispatcher is not None:
-                    break
-            except Exception as e:
-                errors.append("UIDispatcher via %r: %s: %s" % (holder, type(e).__name__, e))
+        if factory is None:
+            log("%s.UIDispatcher" % holder_name, "absent")
+            continue
+        if not callable(factory):
+            log("%s.UIDispatcher" % holder_name, "present but not callable: %s"
+                % safe_repr(factory))
+            continue
+        try:
+            dispatcher = factory(ui)
+            if dispatcher is not None:
+                log("%s.UIDispatcher(ui)" % holder_name, "OK %s" % safe_repr(dispatcher))
+                break
+            log("FAIL %s.UIDispatcher(ui)" % holder_name, "returned None")
+        except Exception as e:
+            log("FAIL %s.UIDispatcher(ui)" % holder_name, "%s: %s" % (type(e).__name__, e))
     if dispatcher is None:
-        errors.append("UIDispatcher not found on bmd/fusion/ui")
+        log("EXIT", "no UIDispatcher")
         return None, errors
     return {"fusion": fusion, "bmd": bmd, "ui": ui, "dispatcher": dispatcher}, errors
 
@@ -2500,10 +2541,21 @@ def main():
         DIALOG.show()
         return
     print("Let's Ramp: no Qt bindings - using Resolve's built-in UIManager UI.")
-    ctx, errors = fusion_ui_context(resolve)
+    try:
+        ctx, log_lines = fusion_ui_context(resolve)
+        trail = "\n".join(log_lines) or "- probe produced no log (unexpected)"
+    except Exception:
+        ctx = None
+        trail = "EXCEPTION in fusion_ui_context:\n" + traceback.format_exc()
+    print("LetsRamp UI probe:\n" + trail)
+    try:
+        (Path.home() / "lets-ramp-ui-log.txt").write_text(
+            "backend: Fusion UIManager\n" + trail + "\n", encoding="utf-8")
+    except Exception:
+        pass
     if ctx is None:
         msg = ("Let's Ramp could not create a UI on this Resolve version.\n"
-               + "\n".join("- %s" % e for e in errors))
+               + trail)
         print(msg)
         try:
             (Path.home() / "lets-ramp-crash.txt").write_text(msg, encoding="utf-8")

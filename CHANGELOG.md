@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.2-alpha
+
+Diagnostics release: the silent UI-probe failure is impossible now.
+
+### Fixed
+- `fusion_ui_context()` could return "could not create a UI" with an
+  **empty error list** when `fusion.UIManager()` returned `None`
+  without raising - the exact failure seen on Resolve 18.6. It now
+  records every probe step (globals, import, scriptapp, Fusion(),
+  UIManager attribute/call, UIDispatcher) with type/repr results and
+  explicit FAIL/EXIT markers, so a failure always names the step that
+  died
+
+### Added
+- Full probe trail printed to the console and written to
+  `~/lets-ramp-ui-log.txt` on **every** run (success or failure);
+  failures also append it to `~/lets-ramp-crash.txt` with traceback if
+  the probe itself raised
+
 ## 0.2.1-alpha
 
 Fix: the panel now opens on Resolve builds without Python Qt bindings

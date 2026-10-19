@@ -1,0 +1,31 @@
+{
+  "Name": "LetsRamp",
+  "Version": "0.1.0",
+  "APIVersion": "2.0",
+  "Description": "Speed-ramp panel scaffold for spike S7 (Workflow Integration load test).",
+  "Author": {
+    "Name": "Let's Ramp",
+    "Email": "support@letsramp.example"
+  },
+  "License": "Proprietary",
+  "Icons": {
+    "Normal": "icons/LetsRamp.png",
+    "Dark": "icons/LetsRamp.png"
+  },
+  "Host": "Resolve",
+  "Category": "Tool",
+  "Tags": ["ramp", "speed", "retime"],
+  "Menu": {
+    "File": {},
+    "Edit": {},
+    "View": {},
+    "Timeline": {},
+    "Tools": {},
+    "Workspace": {
+      "Workflow Integrations": ["LetsRamp"]
+    },
+    "Resolve": {}
+  },
+  "Type": "Workflow Integration",
+  "URI": "letsramp"
+}

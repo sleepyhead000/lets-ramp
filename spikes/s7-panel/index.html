@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Let's Ramp - S7 Load Test</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; background: #1e1e1e; color: #ddd; padding: 16px; }
+    h1 { font-size: 14px; color: #ff9; }
+    pre { background: #2a2a2a; padding: 8px; border-radius: 4px; font-size: 12px; }
+    .ok { color: #6f6; } .err { color: #f66; }
+  </style>
+</head>
+<body>
+  <h1>Let's Ramp — S7 load test</h1>
+  <div id="status">connecting…</div>
+  <pre id="out">—</pre>
+  <script>
+    // Workflow Integration UI API: resolve object is injected by the host.
+    const status = document.getElementById("status");
+    const out = document.getElementById("out");
+    function report(kind, data) {
+      status.innerHTML = '<span class="' + kind + '">' + kind.toUpperCase() + "</span>";
+      out.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    }
+    try {
+      const resolve = typeof __ensa_resolve !== "undefined" ? __ensa_resolve : window.resolve;
+      if (!resolve) { report("err", "no resolve bridge exposed"); }
+      else {
+        const pm = resolve.GetProjectManager();
+        const proj = pm && pm.GetCurrentProject();
+        const tl = proj && proj.GetCurrentTimeline();
+        const items = (tl && tl.GetItemListInTrack("video", 1)) || [];
+        const sel = items[0] || null;
+        report("ok", {
+          page: resolve.GetCurrentPage && resolve.GetCurrentPage(),
+          project: proj && proj.GetName(),
+          timeline: tl && tl.GetName(),
+          firstClip: sel ? { name: sel.GetName(), duration: sel.GetDuration() } : null,
+        });
+      }
+    } catch (e) {
+      report("err", String(e));
+    }
+  </script>
+</body>
+</html>

@@ -37,7 +37,7 @@ except ImportError:
         except ImportError:
             from PyQt6 import QtCore, QtGui, QtWidgets
 
-VERSION = "0.1.0-alpha"
+VERSION = "0.1.1-alpha"
 SPEED_MIN, SPEED_MAX = 0.01, 10.0
 
 PRESETS = [
